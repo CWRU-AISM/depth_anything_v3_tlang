@@ -21,7 +21,16 @@ import numpy as np
 import trimesh
 from loop_utils.alignment_torch import robust_weighted_estimate_sim3_torch
 from loop_utils.alignment_triton import robust_weighted_estimate_sim3_triton
-from numba import njit
+try:
+    from numba import njit
+except ImportError:
+    # numba requires NumPy <= 2.3; make @njit a no-op so the module loads
+    def njit(*args, **kwargs):
+        if args and callable(args[0]):
+            return args[0]
+        def wrapper(fn):
+            return fn
+        return wrapper
 from sklearn.linear_model import LinearRegression, RANSACRegressor
 
 

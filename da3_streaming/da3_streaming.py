@@ -139,6 +139,7 @@ class DA3_Streaming:
         self.overlap_e = self.overlap - self.overlap_s
         self.conf_threshold = 1.5
         self.seed = 42
+        self.process_res = self.config["Model"].get("process_res", 504)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.dtype = (
             torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
@@ -162,6 +163,7 @@ class DA3_Streaming:
         self.all_camera_intrinsics = []
 
         self.delete_temp_files = self.config["Model"]["delete_temp_files"]
+        self.skip_pointcloud = self.config["Model"].get("skip_pointcloud", False)
 
         print("Loading model...")
 
@@ -270,7 +272,11 @@ class DA3_Streaming:
                 images = chunk_image_paths
                 # images: ['xxx.png', 'xxx.png', ...]
 
-                predictions = self.model.inference(images, ref_view_strategy=ref_view_strategy)
+                predictions = self.model.inference(
+                    images,
+                    ref_view_strategy=ref_view_strategy,
+                    process_res=self.process_res,
+                )
 
                 predictions.depth = np.squeeze(predictions.depth)
                 predictions.conf -= 1.0
@@ -625,6 +631,33 @@ class DA3_Streaming:
 
         print("Apply alignment")
         self.sim3_list = accumulate_sim3_transforms(self.sim3_list)
+
+        if self.skip_pointcloud:
+            # Fast path: only save depth/conf/poses, skip point cloud and PLY generation
+            print("  (skip_pointcloud=True: skipping PLY/aligned npy, only saving depth+conf+poses)")
+            # Chunk 0: no transform needed
+            if self.config["Model"]["save_depth_conf_result"]:
+                chunk_data_first = np.load(
+                    os.path.join(self.result_unaligned_dir, "chunk_0.npy"), allow_pickle=True
+                ).item()
+                self.save_depth_conf_result(chunk_data_first, 0, 1, np.eye(3), np.array([0, 0, 0]))
+
+            for chunk_idx in range(len(self.chunk_indices) - 1):
+                print(f"Applying {chunk_idx+1} -> {chunk_idx} (Total {len(self.chunk_indices)-1})")
+                s, R, t = self.sim3_list[chunk_idx]
+                chunk_data = np.load(
+                    os.path.join(self.result_unaligned_dir, f"chunk_{chunk_idx+1}.npy"),
+                    allow_pickle=True,
+                ).item()
+                if self.config["Model"]["save_depth_conf_result"]:
+                    chunk_data.depth *= s
+                    self.save_depth_conf_result(chunk_data, chunk_idx + 1, s, R, t)
+
+            self.save_camera_poses()
+            print("Done.")
+            return
+
+        # Original path: full point cloud computation, alignment, and PLY saving
         for chunk_idx in range(len(self.chunk_indices) - 1):
             print(f"Applying {chunk_idx+1} -> {chunk_idx} (Total {len(self.chunk_indices)-1})")
             s, R, t = self.sim3_list[chunk_idx]
